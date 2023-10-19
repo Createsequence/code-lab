@@ -4,7 +4,7 @@
 
     <parent>
         <artifactId>code-lab</artifactId>
-        <groupId>io.createsequence.github</groupId>
+        <groupId>io.github.createsequence</groupId>
         <version>${revision}</version>
         <relativePath>../pom.xml</relativePath>
     </parent>

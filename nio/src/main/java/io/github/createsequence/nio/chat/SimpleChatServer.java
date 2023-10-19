@@ -1,9 +1,9 @@
-package cn.crane4j.nio;
+package io.github.createsequence.nio.chat;
 
 import cn.hutool.core.lang.Console;
+import cn.hutool.core.text.CharSequenceUtil;
 import lombok.Cleanup;
 import lombok.Getter;
-import lombok.RequiredArgsConstructor;
 import lombok.Setter;
 import lombok.SneakyThrows;
 import lombok.experimental.Accessors;
@@ -16,6 +16,7 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
+import java.util.Collection;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -35,8 +36,10 @@ import java.util.concurrent.ExecutorService;
 @Accessors(chain = true)
 public class SimpleChatServer {
 
-    private static final int CONNECTION_STATUS_LOGIN_OUT = 0;
-    private static final int CONNECTION_STATUS_LOGIN = 1;
+    public static void main(String[] args) {
+        SimpleChatServer server = new SimpleChatServer();
+        server.start();
+    }
 
     @Setter
     private String hostname = "localhost";
@@ -47,7 +50,7 @@ public class SimpleChatServer {
     @Setter
     private ExecutorService executorService = null;
     private boolean started = false;
-    private final Map<SocketChannel, Connection> connectionMap = new ConcurrentHashMap<>(8);
+    private final Map<SocketChannel, ClientConnection> connectionMap = new ConcurrentHashMap<>(8);
 
     /**
      * 启动服务器
@@ -70,11 +73,20 @@ public class SimpleChatServer {
         Console.log("启动事件循环超时时间: {}ms", eventLoopTimeout);
         this.started = true;
         startEvenLoop(selector);
+        Console.log("服务器已关闭！");
+    }
+
+    /**
+     * 关闭服务器
+     */
+    public void stop() {
+        Console.log("关闭服务器...");
+        started = false;
     }
 
     private void startEvenLoop(Selector selector) throws IOException {
         while (this.started) {
-            if (selector.select(eventLoopTimeout) < 1) {
+            if (selector.select() < 1) {
                 continue;
             }
             // 响应事件，若有线程池，则交给线程池处理
@@ -94,7 +106,7 @@ public class SimpleChatServer {
                 doAccept(selector, selectionKey);
             }
             else if (selectionKey.isReadable()) {
-                Console.log("read from client: {}", doRead(selectionKey));
+                doRead(selector, selectionKey);
             }
         } catch (Exception ex) {
             Console.log("事件处理异常，错误信息: {}", ex.getMessage());
@@ -102,38 +114,85 @@ public class SimpleChatServer {
         }
     }
 
-
-
     /**
-     * 选择器中存在已经准备建立链接的通道，
-     * 令其与客户端建立链接，并将连接放入选择器
+     * 将链接放入选择器，并注册对应的{@link ClientConnection}
      *
      * @param selector selector
      * @param key key
      */
     protected void doAccept(Selector selector, SelectionKey key) throws IOException {
-        ServerSocketChannel serverSocketChannel = (ServerSocketChannel) key.channel();
-        Console.log("chanel {} acceptable!", serverSocketChannel);
+        @Cleanup ServerSocketChannel serverSocketChannel = (ServerSocketChannel) key.channel();
         SocketChannel socketChannel = serverSocketChannel.accept();
         socketChannel.configureBlocking(false);
         // 注册链接
         socketChannel.register(selector, SelectionKey.OP_READ);
-        connectionMap.computeIfAbsent(socketChannel, k -> new Connection());
+        registerConnection(socketChannel);
     }
 
     /**
-     * 选择器中存在已经准备读取的通道（即通过{@link #doAccept}创建的），
-     * 从通道读取数据，然后将其关闭。
+     * 从通道中读取数据，然后广播给其他客户端
      *
+     * @param selector selector
      * @param key key
-     * @return 通道的数据
      */
-    protected String doRead(SelectionKey key) throws IOException {
+    protected void doRead(Selector selector, SelectionKey key) throws IOException {
         SocketChannel socketChannel = (SocketChannel) key.channel();
-        Console.log("chanel {} readable!", socketChannel.toString());
-        String result = readDataFromSocketChannel(socketChannel);
+        if (!socketChannel.isConnected()) {
+            unregisterConnection(key, socketChannel);
+        }
+
+        // 如果当前用户未在线，则标记为在线
+        try {
+            // TODO 支持用户名、与基于用户名的单播放、多播等功能
+            // 收到消息后，广播给其他客户端
+            ClientConnection clientConnection = connectionMap.get(socketChannel);
+            String result = readDataFromSocketChannel(socketChannel);
+            Set<SelectionKey> targets = selector.keys();
+            targets.remove(key);
+            if (!targets.isEmpty()) {
+                Console.log("{} 向 {} 个在线客户端广播消息: {}", clientConnection.getUsername(), targets.size(), result);
+                result = CharSequenceUtil.format("{} 说: {}", clientConnection.getUsername(), result);
+                broadcast(result, targets);
+            }
+
+        } catch (IOException ex) {
+            unregisterConnection(key, socketChannel);
+        }
+    }
+
+    private void registerConnection(SocketChannel socketChannel) {
+        connectionMap.computeIfAbsent(socketChannel, k -> {
+            try {
+                ClientConnection connection = new ClientConnection(k.getRemoteAddress().toString());
+                Console.log("客户端 {} 已上线！", connection.getUsername());
+                return connection;
+            } catch (IOException e) {
+                throw new IllegalStateException(e);
+            }
+        });
+    }
+
+    @SneakyThrows
+    private void unregisterConnection(SelectionKey key, SocketChannel socketChannel) {
+        Console.log("客户端 {} 已下线！", socketChannel);
+        connectionMap.remove(socketChannel);
+        key.cancel();
         socketChannel.close();
-        return result;
+    }
+
+    @SuppressWarnings("all")
+    private void broadcast(String msg, Collection<SelectionKey> targets) {
+        for (SelectionKey target : targets) {
+            // 跳过非 SocketChannel 或已断开连接的通道
+            if (!(target.channel() instanceof SocketChannel channel) || !channel.isConnected()) {
+                continue;
+            }
+            try {
+                channel.write(ByteBuffer.wrap(msg.getBytes()));
+            } catch (IOException ex) {
+                unregisterConnection(target, channel);
+            }
+        }
     }
 
     /**
@@ -159,19 +218,13 @@ public class SimpleChatServer {
         return data.toString();
     }
 
-    /**
-     * 关闭服务器
-     */
-    public void stop() {
-        started = false;
-    }
-
     @Getter
     @Setter
     @Accessors(chain = true)
-    @RequiredArgsConstructor
-    private static class Connection {
-        private int status = CONNECTION_STATUS_LOGIN_OUT;
-        private String username = "匿名";
+    private static class ClientConnection {
+        private String username;
+        public ClientConnection(String address) {
+            this.username = address + "@" + System.currentTimeMillis();
+        }
     }
 }

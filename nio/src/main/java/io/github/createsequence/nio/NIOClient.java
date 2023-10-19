@@ -1,4 +1,4 @@
-package cn.crane4j.nio;
+package io.github.createsequence.nio;
 
 import lombok.Cleanup;
 import lombok.SneakyThrows;
@@ -8,8 +8,6 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 
 /**
  * @author huangchengxing
